@@ -1,7 +1,7 @@
 # Preprocessing Pipeline
 
 This pipeline reads XML files from the official Stack Exchange 
-[data dump](https://archive.org/details/stackexchange) and extracts data into JSONL files.
+[data dump](https://archive.org/details/stackexchange) and extracts normalized text blocks into JSONL files.
 
 First, you need to install the preprocessing_pipeline package:
 
