@@ -101,7 +101,7 @@ def extract_text_blocks(dict_elem):
     :param dict_elem: dict with parsed XML attributes
     :return: tuple of post_id and text_blocks
     """
-    return dict_elem
+    return dict_elem['PostId'], [dict_elem['Text']]
 
 
 def normalize_text_blocks(text_block_tuple):
