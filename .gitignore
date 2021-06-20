@@ -1,0 +1,35 @@
+######################
+# OS generated files #
+######################
+*~
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+#Icon?
+ehthumbs.db
+Thumbs.db
+
+##################################
+# IntelliJ IDEA/PyCharm/Webstorm #
+##################################
+.idea/
+*.iml
+
+##########
+# Python #
+##########
+__pycache__/
+*$py.class
+env/
+*.egg-info
+dist/
+
+########
+# Misc #
+########
+*.log
+google-cloud-key.json
+output/
+build/

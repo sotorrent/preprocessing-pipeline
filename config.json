@@ -1,0 +1,11 @@
+{
+  "setup_file": "/Users/sebastian/git/sotorrent/pipeline/setup.py",
+  "save_main_session": true,
+  "pipeline": {
+    "input_dir": "so_dump/",
+    "output_dir": "output/",
+    "pipeline_options": {
+      "runner": "DirectRunner"
+    }
+  }
+}
