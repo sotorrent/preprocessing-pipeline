@@ -7,6 +7,9 @@ import apache_beam as beam
 from xml.etree import ElementTree
 from apache_beam.coders import coders
 
+from preprocessing_pipeline.so.pipeline.post_blocks import CodeBlock, TextBlock
+from preprocessing_pipeline.so.util.regex import *
+
 logger = logging.getLogger(__name__)
 
 
@@ -101,7 +104,257 @@ def extract_text_blocks(dict_elem):
     :param dict_elem: dict with parsed XML attributes
     :return: tuple of post_id and text_blocks
     """
-    return dict_elem['PostId'], [dict_elem['Text']]
+    post_id = int(dict_elem['PostId'])
+    markdown_content = dict_elem['Text']
+    post_blocks = []
+
+    lines = re.split(newline_regex, markdown_content)
+
+    current_post_block = None
+    previous_line = None
+    code_block_ends_with_next_line = False
+
+    in_code_tag_block = False
+    in_stack_snippet_code_block = False
+    in_script_tag_code_block = False
+    in_alternative_code_block = False
+
+    for line in lines:
+        # ignore empty lines
+        if not line:
+            previous_line = line
+            continue
+
+        # end code block which contained a code tag in the previous line (see below)
+        if code_block_ends_with_next_line:
+            in_code_tag_block = False
+            code_block_ends_with_next_line = False
+
+        # check for indented code blocks (Stack Overflow's standard way)
+        # even if tab is not listed here: http://stackoverflow.com/editing-help#code
+        # we observed cases where it was important to check for the tab, sometimes preceded by spaces
+        in_markdown_code_block = code_block_regex.match(line) is not None  # only match beginning of line
+        # check if line only contains whitespaces
+        # (ignore whitespaces at the beginning of posts and not end blocks with whitespace lines)
+        is_whitespace_line = whitespace_line_regex.fullmatch(line) is not None  # match whole line
+        # e.g. "<!-- language: lang-js -->" (see https://stackoverflow.com/editing-help#syntax-highlighting)
+        is_snippet_language = snippet_language_regex.fullmatch(line) is not None  # match whole line
+        # in some posts an empty XML comment ("<!-- -->") is used to divide code blocks (see, e.g., post 33058542)
+        is_snippet_divider = snippet_divider_regex.fullmatch(line) is not None  # match whole line
+        # in some cases, there are inline code blocks in a single line (`...`)
+        is_inline_code_line = inline_code_line_regex.fullmatch(line) is not None  # match whole line
+
+        # if line is not part of a regular Stack Overflow code block, try to detect alternative code block styles
+        if not in_markdown_code_block and not is_whitespace_line and not is_snippet_language:
+            # see https://stackoverflow.blog/2014/09/16/introducing-runnable-javascript-css-and-html-code-snippets/
+            is_stack_snippet_begin = stack_snippet_begin_regex.match(line) is not None  # only match beginning of line
+            # ignore stack snippet begin in post block version
+            if is_stack_snippet_begin:
+                in_stack_snippet_code_block = True
+                # remove stack snippet info from code block
+                line = stack_snippet_begin_regex.sub(line, "")
+                if not line.strip():  # if string empty after removing leading and trailing whitespaces
+                    # line only contained stack snippet begin
+                    continue
+
+            is_stack_snippet_end = stack_snippet_end_regex.match(line) is not None  # only match beginning of line
+            # ignore stack snippet end in post block version
+            if is_stack_snippet_end:
+                in_stack_snippet_code_block = False
+                # remove stack snippet info from code block
+                line = is_stack_snippet_end.sub(line, "")
+                if not line.strip():  # if string empty after removing leading and trailing whitespaces
+                    # line only contained stack snippet begin
+                    continue
+
+            # code block that is marked by <pre><code> ... </pre></code> instead of indention
+            is_code_tag_begin = code_tag_begin_regex.match(line) is not None  # only match beginning of line
+            if is_code_tag_begin:
+                # remove code tag from line
+                line = code_tag_begin_regex.sub(line, "")
+                in_code_tag_block = True
+                if not line.strip():  # if string empty after removing leading and trailing whitespaces
+                    # line only contained opening code tags -> skip
+                    continue
+
+            is_code_tag_end = code_tag_end_regex.match(line) is not None  # only match beginning of line
+            if is_code_tag_end:
+                # remove code tag from line
+                line = code_tag_end_regex.sub(line, "")
+                if not line.strip():  # if string empty after removing leading and trailing whitespaces
+                    # line only contained closing code tags -> close code block and skip
+                    in_code_tag_block = False
+                    continue
+                else:
+                    # line also contained content -> close code block in next line
+                    code_block_ends_with_next_line = True
+
+            # code block that is marked by <script...> ... </script> instead of correct indention
+            is_script_tag_begin = script_tag_begin_regex.match(line) is not None  # only match beginning of line
+            if is_script_tag_begin:
+                # remove opening script tag
+                line = script_tag_open_regex.sub(line, "", count=1)
+                in_script_tag_code_block = True
+                if not line.strip():  # if string empty after removing leading and trailing whitespaces
+                    # line only contained opening script tag -> skip
+                    continue
+
+            is_script_tag_end = script_tag_end_regex.match(line) is not None # only match beginning of line
+            if is_script_tag_end:
+                # remove closing script tag
+                line = script_tag_close_regex.sub(line, "")
+                if not line.strip():  # if string empty after removing leading and trailing whitespaces
+                    # line only contained closing script tag -> close code block and skip
+                    in_script_tag_code_block = False
+                    continue
+                else:
+                    # line also contained content -> close script block in next line
+                    code_block_ends_with_next_line = True
+
+            # see https://meta.stackexchange.com/q/125148
+            # example: https://stackoverflow.com/posts/32342082/revisions
+            is_alternative_code_block_begin = alternative_code_block_begin_regex.match(line) is not None
+            if is_alternative_code_block_begin:
+                # remove first "```" from line
+                line = alternative_code_block_begin_regex.sub(line, "", count=1)
+                in_alternative_code_block = True
+                # continue if line only contained "```"
+                if not line.strip():  # if string empty after removing leading and trailing whitespaces
+                    continue
+                else:
+                    if alternative_code_block_marker_regex.match(line) is not None:
+                        # alternative code block was inline code block (which should be part of a text block)
+                        line = alternative_code_block_marker_regex.sub(line, "")
+                        in_alternative_code_block = False
+
+            is_alternative_code_block_end = alternative_code_block_end_regex.match(line) is not None
+            if is_alternative_code_block_end:
+                # remove "```" from line
+                line = alternative_code_block_marker_regex.sub(line, "")
+                in_alternative_code_block = False
+
+        if is_snippet_language:
+            # remove snippet language information
+            line = snippet_language_regex.sub(line, "")
+
+        if is_inline_code_line:
+            # replace leading and trailing backtick and HTML line break if present
+            line = inline_code_line_regex.match(line).group(1)
+
+        # decide if the current line is part of a code block
+        in_non_markdown_code_block = (is_snippet_language and not line.strip()) or in_stack_snippet_code_block \
+            or in_alternative_code_block or in_code_tag_block or in_script_tag_code_block or is_inline_code_line
+
+        if not current_post_block:  # first block in post
+            # ignore whitespaces at the beginning of a post
+            if not is_whitespace_line:
+                # first line, block element not created yet
+                if in_markdown_code_block or in_non_markdown_code_block:
+                    current_post_block = CodeBlock(post_id)
+                else:
+                    current_post_block = TextBlock(post_id)
+        else:
+            # current block has length > 0 => check if current line belongs to this block
+            # or if it is first line of next block
+            if isinstance(current_post_block, TextBlock):
+                # check if line contains letters or digits (heuristic for malformed post blocks)
+                previous_line_contains_letters_or_digits = \
+                    contains_letter_or_digit_regex.search(previous_line) is not None
+
+                if ((in_markdown_code_block
+                    and (not previous_line.strip() or not previous_line_contains_letters_or_digits))
+                        or in_non_markdown_code_block) and not is_whitespace_line:
+                    # End of text block, beginning of code block.
+                    # Do not end text block if next line is whitespace line
+                    # see, e.g., second line of PostHistory, Id=97576027
+                    if not current_post_block.is_empty():
+                        post_blocks.append(current_post_block)
+                    current_post_block = CodeBlock(post_id)
+
+            elif isinstance(current_post_block, CodeBlock):
+                # snippet language or snippet divider divide two code blocks ( if first block is not empty)
+                if is_snippet_language or is_snippet_divider:
+                    if not current_post_block.is_empty():
+                        post_blocks.append(current_post_block)
+                    current_post_block = CodeBlock(post_id)
+                elif (not in_markdown_code_block and not in_non_markdown_code_block) and not is_whitespace_line:
+                    # In a Stack Snippet, the lines do not have to be indented (see version 12 of answer
+                    # 26044128 and corresponding test case).
+                    # Do not close code postBlocks when whitespace line is reached
+                    # see, e.g., PostHistory, Id=55158265, PostId=20991163 (-> test case).
+                    # Do not end code block if next line is whitespace line
+                    # see, e.g., second line of PostHistory, Id=97576027
+                    if not current_post_block.is_empty():
+                        post_blocks.append(current_post_block)
+                    current_post_block = TextBlock(post_id)
+
+        # ignore snippet language information (see https://stackoverflow.com/editing-help#syntax-highlighting)
+        if current_post_block and not is_snippet_language:
+            current_post_block.append(line)
+
+        previous_line = line
+
+    if current_post_block and not current_post_block.is_empty():
+        # last block not added yet
+        post_blocks.append(current_post_block)
+
+    _revise_post_blocks(post_blocks)
+
+    return post_id, list(map(lambda block: block.content, filter(lambda block: isinstance(block, TextBlock), post_blocks)))
+
+
+def _revise_post_blocks(post_blocks):
+    marked_for_deletion = set()
+
+    for i in range(len(post_blocks)):
+        current_post_block = post_blocks[i]
+
+        # ignore post block if it is already marked for deletion
+        if current_post_block in marked_for_deletion:
+            continue
+
+        # In some cases when a code blocks ends with a single character, the indention by 4 spaces is missing in
+        # the table PostHistory (see, e.g., PostHistoryId=96888165). The following code should prevent most of
+        # these cases from being recognized as text blocks.
+
+        # remove this post block if does not contain letters or digits
+        contains_letter_or_digit = contains_letter_or_digit_regex.search(current_post_block.content)
+
+        if contains_letter_or_digit:
+            continue
+
+        if i == 0:
+            # current post block is first one
+            if len(post_blocks) > 1:
+                next_post_block = post_blocks[i+1]
+                next_post_block.prepend(current_post_block.content)
+                marked_for_deletion.add(current_post_block)
+        else:
+            # current post block is not first one (has predecessor)
+            previous_post_block = post_blocks[i-1]
+
+            if previous_post_block in marked_for_deletion:
+                continue
+
+            previous_post_block.append(current_post_block.content)
+            marked_for_deletion.add(current_post_block)
+
+            # current post block must have successor
+            if i >= (len(post_blocks) - 1):
+                continue
+
+            next_post_block = post_blocks[i+1]
+
+            # merge predecessor and successor if they have same type
+            if previous_post_block.__class__ != next_post_block.__class__:
+                continue
+
+            previous_post_block.append(next_post_block.content)
+            marked_for_deletion.add(next_post_block)
+
+    # remove post blocks marked for deletion
+    for current_post_block in marked_for_deletion:
+        post_blocks.remove(current_post_block)
 
 
 def normalize_text_blocks(text_block_tuple):
