@@ -18,22 +18,46 @@ def run_pipeline(config):
     Execute the preprocessing pipeline (locally, later also in Google Cloud).
     :return: None
     """
-    logger.info(f"Writing output of pipeline to '{config.output_file}'")
-    logger.info(f"Reading and converting XML file '{config.input_file}'...")
+    logger.info(f"Writing output of pipeline to '{config.output_dir}'")
+    logger.info(f"Reading and converting XML files from '{config.input_dir}'...")
     with beam.Pipeline(options=config.get_pipeline_options()) as p:
-        dict_elements = (p
-                         | "Read XML file" >> beam.io.ReadFromText(config.input_file)
-                         | "Ignore non-row elements" >> beam.Filter(filter_rows)
-                         | "Convert XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict))
-        output_file_without_ext, _ = os.path.splitext(config.output_file)
-        logger.info(f"Writing data to JSONL file '{config.output_file}'")
-        (dict_elements  | "Filter post edits" >> beam.Filter(filter_post_edits)
-                        | "Extract relevant post attributes" >> beam.Map(extract_attributes)
-                        | "Group by post id" >> beam.GroupBy(get_key)
-                        | "Get most recent version for each post id" >> beam.Map(get_most_recent_version)
-                        | "Extract text blocks" >> beam.Map(extract_text_blocks)
-                        | "Normalize text blocks" >> beam.Map(normalize_text_blocks)
-                        | "Writing data to JSONL file" >> WriteToJson(output_file_without_ext))
+        posts_elems = (p
+                       | "Read posts XML file" >> beam.io.ReadFromText(config.posts_xml)
+                       | "Ignore non-row post elements" >> beam.Filter(filter_rows)
+                       | "Convert post XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
+                       | "Ignore posts with non-positive score" >> beam.Filter(filter_score)
+                       | "Extract relevant post attributes" >> beam.Map(extract_posts_attributes)
+                       | "Group posts by post id" >> beam.GroupBy(get_post_id))
+
+        posts_dict = beam.pvalue.AsDict(posts_elems)
+
+        comment_elems = (p
+                         | "Read comment XML file" >> beam.io.ReadFromText(config.comments_xml)
+                         | "Ignore non-row comment elements" >> beam.Filter(filter_rows)
+                         | "Convert comment XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
+                         | "Ignore comments with non-positive score" >> beam.Filter(filter_score)
+                         | "Extract relevant comment attributes" >> beam.Map(extract_comment_attributes)
+                         | "Group comments by post id" >> beam.GroupBy(get_post_id)
+                         | "Extract comment text" >> beam.Map(extract_comment_text))
+
+        comment_dict = beam.pvalue.AsDict(comment_elems)
+
+        post_history_elems = (p
+                              | "Read post history XML file" >> beam.io.ReadFromText(config.post_history_xml)
+                              | "Ignore non-row post history elements" >> beam.Filter(filter_rows)
+                              | "Convert post history XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
+                              | "Filter post edits and ignore posts with non-positive score" >> beam.Filter(filter_post_edits_score, posts=posts_dict)
+                              | "Extract relevant post history attributes" >> beam.Map(extract_post_history_attributes)
+                              | "Group post history by post id" >> beam.GroupBy(get_post_id)
+                              | "Get most recent version for each post id" >> beam.Map(get_most_recent_version))
+
+        output_file_without_ext, _ = os.path.splitext(config.output_jsonl)
+        logger.info(f"Writing data to JSONL file '{config.output_jsonl}'")
+        (post_history_elems
+         | "Extract text blocks" >> beam.Map(extract_text_blocks)
+         | "Add comments" >> beam.Map(add_comments, comments=comment_dict)
+         | "Writing data to JSONL file" >> WriteToJson(output_file_without_ext))
+
     logger.info(f"Pipeline finished.")
 
 
@@ -55,57 +79,104 @@ def xml_attributes_to_dict(xml_str):
     return ElementTree.fromstring(xml_str).attrib
 
 
-def filter_post_edits(dict_elem):
+def filter_post_edits_score(dict_elem, posts):
     """
     Filter post history events that modified the body of the posts.
     :param dict_elem: dict with parsed XML attributes
+    :param posts: dict with posts (to get post score)
     :return: boolean indicating whether element modified the body of the corresponding post
     """
-    return int(dict_elem['PostHistoryTypeId']) in [2, 5, 8]
+    post_id = int(dict_elem['PostId'])
+    post_history_type_id = int(dict_elem['PostHistoryTypeId'])
+    return post_history_type_id in [2, 5, 8] and post_id in posts
 
 
-def extract_attributes(dict_elem):
+def filter_score(dict_elem):
     """
-    Select the attributes of interest from the attribute dict.
+    Filter post/comment elements with a positive score.
+    :param dict_elem: dict with parsed XML attributes
+    :return: boolean indicating whether post has a positive score
+    """
+    return int(dict_elem['Score']) > 0
+
+
+def extract_post_history_attributes(dict_elem):
+    """
+    Select the attributes of interest from the post history attribute dict.
     :param dict_elem: dict with parsed XML attributes
     :return: dict with selection of parsed XML attributes
     """
     return {
-        'PostId': dict_elem['PostId'],
+        'PostId': int(dict_elem['PostId']),
         'CreationDate': dict_elem['CreationDate'],
         'Text': dict_elem['Text']
     }
 
 
-def get_key(dict_elem):
+def extract_posts_attributes(dict_elem):
     """
-    Returns the key property of the attribute dict.
+    Select the attributes of interest from the post history attribute dict.
     :param dict_elem: dict with parsed XML attributes
-    :return: key element
+    :return: dict with selection of parsed XML attributes
     """
-    return dict_elem['PostId']
+    return {
+        'PostId': int(dict_elem['Id']),
+        'Score': dict_elem['Score']
+    }
 
 
-def get_most_recent_version(grouped_dict_elem):
+def extract_comment_attributes(dict_elem):
+    """
+    Select the attributes of interest from the comment attribute dict.
+    :param dict_elem: dict with parsed XML attributes
+    :return: dict with selection of parsed XML attributes
+    """
+    return {
+        'PostId': int(dict_elem['PostId']),
+        'Score': dict_elem['Score'],
+        'Text': dict_elem['Text']
+    }
+
+
+def extract_comment_text(comment_pair):
+    """
+    Convert pair of post id, dict with parsed attributes to pair of post_id, list of comment texts
+    :param comment_pair: pair of post_id, dict with parsed attributes
+    :return: pair of post_id, list of comment texts
+    """
+    post_id, comment_dicts = comment_pair
+    return post_id, list(map(lambda comment_dict: comment_dict["Text"], comment_dicts))
+
+
+def get_post_id(dict_elem):
+    """
+    Returns the key property of the attribute dict i.e. the post id
+    :param dict_elem: dict with parsed XML attributes
+    :return: key element, i.e. the post id
+    """
+    return int(dict_elem['PostId'])
+
+
+def get_most_recent_version(post_edits_pair):
     """
     Sorts the dict values of the grouped post edits by creation date in descending order and return the most recent
     dict element i.e. version of the post.
-    :param grouped_dict_elem:  dict elements with post id as key and list of attribute dict elements as values
+    :param post_edits_pair: pair of post id, list of attribute dict elements
     :return: most recent dict element i.e. post version
     """
-    (post_id, post_edits) = grouped_dict_elem
+    (post_id, post_edits) = post_edits_pair
     post_edits.sort(key=lambda dict_elem: dict_elem['CreationDate'], reverse=True)
-    return post_edits[0]
+    return post_id, post_edits[0]
 
 
-def extract_text_blocks(dict_elem):
+def extract_text_blocks(post_edit_pair):
     """
     Extracts all text blocks from the Markdown source of a post version
-    :param dict_elem: dict with parsed XML attributes
+    :param post_edit_pair: pair of post id, attribute dict element of most recent version
     :return: tuple of post_id and text_blocks
     """
-    post_id = int(dict_elem['PostId'])
-    markdown_content = dict_elem['Text']
+    post_id, post_edit = post_edit_pair
+    markdown_content = post_edit['Text']
     post_blocks = []
 
     lines = re.split(newline_regex, markdown_content)
@@ -300,7 +371,12 @@ def extract_text_blocks(dict_elem):
 
     _revise_post_blocks(post_blocks)
 
-    return post_id, list(map(lambda block: block.content, filter(lambda block: isinstance(block, TextBlock), post_blocks)))
+    return post_id, list(
+        map(lambda block: block.content,
+            filter(lambda block: isinstance(block, TextBlock),
+                   post_blocks)
+            )
+    )
 
 
 def _revise_post_blocks(post_blocks):
@@ -357,13 +433,19 @@ def _revise_post_blocks(post_blocks):
         post_blocks.remove(current_post_block)
 
 
-def normalize_text_blocks(text_block_tuple):
+def add_comments(text_blocks_pair, comments):
     """
-    Normalizes the content of text blocks (Markdown)
-    :param text_block_tuple: tuple of post_id and text_blocks
-    :return: sample tuple, but with normalized text blocks
+    Add comments to tuple of post_id and text blocks
+    :param text_blocks_pair: pair of post id and list of text blocks
+    :param comments: dict with comments per post id
+    :return: tuple of post_id and text_blocks
     """
-    return text_block_tuple
+    post_id, text_blocks = text_blocks_pair
+    post_comments = comments[post_id]
+    return post_id, {
+        "text_blocks": text_blocks,
+        "comments": post_comments
+    }
 
 
 class JsonSink(beam.io.FileBasedSink):

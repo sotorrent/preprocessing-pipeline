@@ -15,8 +15,12 @@ class Config:
             self.setup_file = json_config['setup_file']
             self.save_main_session = json_config['save_main_session']
             self.pipeline = json_config['pipeline']
-            self.input_file = os.path.join(self.pipeline['input_dir'], 'PostHistory.xml')
-            self.output_file = os.path.join(self.pipeline['output_dir'], 'PostHistory.jsonl')
+            self.input_dir = self.pipeline['input_dir']
+            self.post_history_xml = os.path.join(self.input_dir, 'PostHistory.xml')
+            self.posts_xml = os.path.join(self.input_dir, 'Posts.xml')
+            self.comments_xml = os.path.join(self.input_dir, 'Comments.xml')
+            self.output_dir = self.pipeline['output_dir']
+            self.output_jsonl = os.path.join(self.output_dir, 'output.jsonl')
         logger.info("Configuration initialized.")
 
     def get_pipeline_options(self):
