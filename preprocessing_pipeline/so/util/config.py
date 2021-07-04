@@ -1,6 +1,8 @@
 import json
 import logging
 import os
+import sys
+
 from apache_beam.options.pipeline_options import PipelineOptions, SetupOptions
 
 LOG_LEVEL = logging.INFO
@@ -13,6 +15,11 @@ class Config:
         with open(config_file, mode='r', encoding='utf-8') as fp:
             json_config = json.loads(fp.read())
             self.setup_file = json_config['setup_file']
+            if not os.path.isfile(self.setup_file):
+                logger.error(f"Setup file not found: {self.setup_file}")
+                logger.error("Exiting...")
+                sys.exit(-1)
+            self.google_credentials_json_file = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
             self.save_main_session = json_config['save_main_session']
             self.pipeline = json_config['pipeline']
             self.input_dir = self.pipeline['input_dir']
