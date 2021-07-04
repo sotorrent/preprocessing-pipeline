@@ -1,6 +1,8 @@
+import itertools
 import json
 import logging
 import os
+import sys
 
 import apache_beam as beam
 
@@ -21,42 +23,42 @@ def run_pipeline(config):
     logger.info(f"Writing output of pipeline to '{config.output_dir}'")
     logger.info(f"Reading and converting XML files from '{config.input_dir}'...")
     with beam.Pipeline(options=config.get_pipeline_options()) as p:
-        posts_elems = (p
-                       | "Read posts XML file" >> beam.io.ReadFromText(config.posts_xml)
-                       | "Ignore non-row post elements" >> beam.Filter(filter_rows)
-                       | "Convert post XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
-                       | "Ignore posts with non-positive score" >> beam.Filter(filter_score)
-                       | "Extract relevant post attributes" >> beam.Map(extract_posts_attributes)
-                       | "Group posts by post id" >> beam.GroupBy(get_post_id))
+        post_scores = (p
+            | "Read posts XML file" >> beam.io.ReadFromText(config.posts_xml)
+            | "Ignore non-row post elements" >> beam.Filter(filter_rows)
+            | "Convert post XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
+            | "Extract relevant post attributes" >> beam.Map(extract_posts_attributes)
+            | "Group posts by post id" >> beam.GroupBy(get_post_id)
+            | "Extract score" >> beam.Map(extract_score))
 
-        posts_dict = beam.pvalue.AsDict(posts_elems)
+        comment_texts = (p
+            | "Read comment XML file" >> beam.io.ReadFromText(config.comments_xml)
+            | "Ignore non-row comment elements" >> beam.Filter(filter_rows)
+            | "Convert comment XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
+            | "Ignore comments with non-positive score" >> beam.Filter(filter_score)
+            | "Extract relevant comment attributes" >> beam.Map(extract_comment_attributes)
+            | "Group comments by post id" >> beam.GroupBy(get_post_id)
+            | "Extract comment text" >> beam.Map(extract_comment_text))
 
-        comment_elems = (p
-                         | "Read comment XML file" >> beam.io.ReadFromText(config.comments_xml)
-                         | "Ignore non-row comment elements" >> beam.Filter(filter_rows)
-                         | "Convert comment XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
-                         | "Ignore comments with non-positive score" >> beam.Filter(filter_score)
-                         | "Extract relevant comment attributes" >> beam.Map(extract_comment_attributes)
-                         | "Group comments by post id" >> beam.GroupBy(get_post_id)
-                         | "Extract comment text" >> beam.Map(extract_comment_text))
-
-        comment_dict = beam.pvalue.AsDict(comment_elems)
-
-        post_history_elems = (p
-                              | "Read post history XML file" >> beam.io.ReadFromText(config.post_history_xml)
-                              | "Ignore non-row post history elements" >> beam.Filter(filter_rows)
-                              | "Convert post history XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
-                              | "Filter post edits and ignore posts with non-positive score" >> beam.Filter(filter_post_edits_score, posts=posts_dict)
-                              | "Extract relevant post history attributes" >> beam.Map(extract_post_history_attributes)
-                              | "Group post history by post id" >> beam.GroupBy(get_post_id)
-                              | "Get most recent version for each post id" >> beam.Map(get_most_recent_version))
+        post_text_blocks = (p
+            | "Read post history XML file" >> beam.io.ReadFromText(config.post_history_xml)
+            | "Ignore non-row post history elements" >> beam.Filter(filter_rows)
+            | "Convert post history XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
+            | "Filter post edits" >> beam.Filter(filter_post_edits)
+            | "Extract relevant post history attributes" >> beam.Map(extract_post_history_attributes)
+            | "Group post history by post id" >> beam.GroupBy(get_post_id)
+            | "Get most recent version for each post id" >> beam.Map(get_most_recent_version)
+            | "Extract text blocks" >> beam.Map(extract_text_blocks))
 
         output_file_without_ext, _ = os.path.splitext(config.output_jsonl)
         logger.info(f"Writing data to JSONL file '{config.output_jsonl}'")
-        (post_history_elems
-         | "Extract text blocks" >> beam.Map(extract_text_blocks)
-         | "Add comments" >> beam.Map(add_comments, comments=comment_dict)
-         | "Writing data to JSONL file" >> WriteToJson(output_file_without_ext))
+        (({
+            'post_score': post_scores, 'post_text_blocks': post_text_blocks, 'comment_texts': comment_texts
+        })
+            | "Merge post scores, text blocks, and comments" >> beam.CoGroupByKey()
+            | "Flatten grouped data" >> beam.Map(flatten_group)
+            | "Filter posts with positive score" >> beam.Filter(filter_score_grouped_pair)
+            | "Write text blocks to JSONL file" >> WriteToJson(output_file_without_ext))
 
     logger.info(f"Pipeline finished.")
 
@@ -79,16 +81,13 @@ def xml_attributes_to_dict(xml_str):
     return ElementTree.fromstring(xml_str).attrib
 
 
-def filter_post_edits_score(dict_elem, posts):
+def filter_post_edits(dict_elem):
     """
     Filter post history events that modified the body of the posts.
     :param dict_elem: dict with parsed XML attributes
-    :param posts: dict with posts (to get post score)
     :return: boolean indicating whether element modified the body of the corresponding post
     """
-    post_id = int(dict_elem['PostId'])
-    post_history_type_id = int(dict_elem['PostHistoryTypeId'])
-    return post_history_type_id in [2, 5, 8] and post_id in posts
+    return int(dict_elem['PostHistoryTypeId']) in [2, 5, 8]
 
 
 def filter_score(dict_elem):
@@ -100,16 +99,74 @@ def filter_score(dict_elem):
     return int(dict_elem['Score']) > 0
 
 
+def flatten_group(post_group):
+    """
+    Flatten lists in grouped post data.
+    :param post_group: List with post score and lists containing post score, text blocks, and comment texts.
+    :return: pair of post_id and dict with post score, text blocks, and comment texts.
+    """
+    post_group = list(post_group)
+
+    if len(post_group) != 2:
+        error_message = f"Post group did not have correct format (more than two root elements): {post_group}"
+        logger.error(error_message)
+        sys.exit(error_message)
+
+    post_id = int(post_group[0])
+    post_dict = dict(post_group[1])
+
+    if 'post_score' not in post_dict or 'post_text_blocks' not in post_dict or 'comment_texts' not in post_dict:
+        error_message = f"Post group did not have correct format (key missing): {post_group}"
+        logger.error(error_message)
+        sys.exit(error_message)
+
+    post_score_list = list(post_dict['post_score'])
+    post_text_blocks_list = list(post_dict['post_text_blocks'])
+    comment_texts_list = list(post_dict['comment_texts'])
+
+    if len(post_score_list) > 1:
+        error_message = f"Post group did not have correct format (multiple post scores): {post_group}"
+        logger.error(error_message)
+        sys.exit(error_message)
+
+    if len(post_score_list) > 0:
+        post_score = int(post_score_list[0])
+    else:
+        post_score = None
+
+    return post_id, {
+        'score': post_score,
+        'text_blocks': list(itertools.chain(*post_text_blocks_list)),
+        'comments': list(itertools.chain(*comment_texts_list))
+    }
+
+
+def filter_score_grouped_pair(post_pair):
+    """
+    Filter posts with a positive score.
+    :param post_pair: pair of post_id, dict with score, text blocks, and comments
+    :return: boolean indicating whether post has a positive score
+    """
+    _, post_dict = post_pair
+    post_score = post_dict['score']
+    return post_score and int(post_score) > 0
+
+
 def extract_post_history_attributes(dict_elem):
     """
     Select the attributes of interest from the post history attribute dict.
     :param dict_elem: dict with parsed XML attributes
     :return: dict with selection of parsed XML attributes
     """
+    if 'Text' in dict_elem:
+        text = dict_elem['Text']
+    else:
+        text = ""
+
     return {
         'PostId': int(dict_elem['PostId']),
         'CreationDate': dict_elem['CreationDate'],
-        'Text': dict_elem['Text']
+        'Text': text
     }
 
 
@@ -145,7 +202,23 @@ def extract_comment_text(comment_pair):
     :return: pair of post_id, list of comment texts
     """
     post_id, comment_dicts = comment_pair
-    return post_id, list(map(lambda comment_dict: comment_dict["Text"], comment_dicts))
+    return post_id, list(map(lambda comment_dict: comment_dict['Text'], comment_dicts))
+
+
+def extract_score(post_pair):
+    """
+    Reduce the right-hand side of the pair to the score alone (without post id).
+    :param post_pair: Pair of post_id, dict with parse attributes
+    :return: pair of post_id, score
+    """
+    post_id, post_dicts = post_pair
+    post_dicts = list(post_dicts)
+
+    if len(post_dicts) == 1:
+        return post_id,  post_dicts[0]['Score']
+    else:
+        logger.warning(f"Post {post_id} has more than one score, ignoring scores.")
+        return post_id, None
 
 
 def get_post_id(dict_elem):
@@ -165,6 +238,7 @@ def get_most_recent_version(post_edits_pair):
     :return: most recent dict element i.e. post version
     """
     (post_id, post_edits) = post_edits_pair
+    post_edits = list(post_edits)
     post_edits.sort(key=lambda dict_elem: dict_elem['CreationDate'], reverse=True)
     return post_id, post_edits[0]
 
@@ -218,40 +292,36 @@ def extract_text_blocks(post_edit_pair):
         # if line is not part of a regular Stack Overflow code block, try to detect alternative code block styles
         if not in_markdown_code_block and not is_whitespace_line and not is_snippet_language:
             # see https://stackoverflow.blog/2014/09/16/introducing-runnable-javascript-css-and-html-code-snippets/
-            is_stack_snippet_begin = stack_snippet_begin_regex.match(line) is not None  # only match beginning of line
             # ignore stack snippet begin in post block version
-            if is_stack_snippet_begin:
+            if stack_snippet_begin_regex.match(line):  # only match beginning of line
                 in_stack_snippet_code_block = True
                 # remove stack snippet info from code block
-                line = stack_snippet_begin_regex.sub(line, "")
+                line = stack_snippet_begin_regex.sub("", line)
                 if not line.strip():  # if string empty after removing leading and trailing whitespaces
                     # line only contained stack snippet begin
                     continue
 
-            is_stack_snippet_end = stack_snippet_end_regex.match(line) is not None  # only match beginning of line
             # ignore stack snippet end in post block version
-            if is_stack_snippet_end:
+            if stack_snippet_end_regex.match(line):  # only match beginning of line
                 in_stack_snippet_code_block = False
                 # remove stack snippet info from code block
-                line = is_stack_snippet_end.sub(line, "")
+                line = stack_snippet_end_regex.sub("", line)
                 if not line.strip():  # if string empty after removing leading and trailing whitespaces
                     # line only contained stack snippet begin
                     continue
 
             # code block that is marked by <pre><code> ... </pre></code> instead of indention
-            is_code_tag_begin = code_tag_begin_regex.match(line) is not None  # only match beginning of line
-            if is_code_tag_begin:
+            if code_tag_begin_regex.match(line):  # only match beginning of line
                 # remove code tag from line
-                line = code_tag_begin_regex.sub(line, "")
+                line = code_tag_begin_regex.sub("", line)
                 in_code_tag_block = True
                 if not line.strip():  # if string empty after removing leading and trailing whitespaces
                     # line only contained opening code tags -> skip
                     continue
 
-            is_code_tag_end = code_tag_end_regex.match(line) is not None  # only match beginning of line
-            if is_code_tag_end:
+            if code_tag_end_regex.match(line):  # only match beginning of line
                 # remove code tag from line
-                line = code_tag_end_regex.sub(line, "")
+                line = code_tag_end_regex.sub("", line)
                 if not line.strip():  # if string empty after removing leading and trailing whitespaces
                     # line only contained closing code tags -> close code block and skip
                     in_code_tag_block = False
@@ -261,19 +331,17 @@ def extract_text_blocks(post_edit_pair):
                     code_block_ends_with_next_line = True
 
             # code block that is marked by <script...> ... </script> instead of correct indention
-            is_script_tag_begin = script_tag_begin_regex.match(line) is not None  # only match beginning of line
-            if is_script_tag_begin:
+            if script_tag_begin_regex.match(line):  # only match beginning of line
                 # remove opening script tag
-                line = script_tag_open_regex.sub(line, "", count=1)
+                line = script_tag_open_regex.sub("", line, count=1)
                 in_script_tag_code_block = True
                 if not line.strip():  # if string empty after removing leading and trailing whitespaces
                     # line only contained opening script tag -> skip
                     continue
 
-            is_script_tag_end = script_tag_end_regex.match(line) is not None # only match beginning of line
-            if is_script_tag_end:
+            if script_tag_end_regex.match(line):  # only match beginning of line
                 # remove closing script tag
-                line = script_tag_close_regex.sub(line, "")
+                line = script_tag_close_regex.sub("", line)
                 if not line.strip():  # if string empty after removing leading and trailing whitespaces
                     # line only contained closing script tag -> close code block and skip
                     in_script_tag_code_block = False
@@ -284,29 +352,27 @@ def extract_text_blocks(post_edit_pair):
 
             # see https://meta.stackexchange.com/q/125148
             # example: https://stackoverflow.com/posts/32342082/revisions
-            is_alternative_code_block_begin = alternative_code_block_begin_regex.match(line) is not None
-            if is_alternative_code_block_begin:
+            if alternative_code_block_begin_regex.match(line):  # only match beginning of line
                 # remove first "```" from line
-                line = alternative_code_block_begin_regex.sub(line, "", count=1)
+                line = alternative_code_block_begin_regex.sub("", line, count=1)
                 in_alternative_code_block = True
                 # continue if line only contained "```"
                 if not line.strip():  # if string empty after removing leading and trailing whitespaces
                     continue
                 else:
-                    if alternative_code_block_marker_regex.match(line) is not None:
+                    if alternative_code_block_marker_regex.match(line):
                         # alternative code block was inline code block (which should be part of a text block)
-                        line = alternative_code_block_marker_regex.sub(line, "")
+                        line = alternative_code_block_marker_regex.sub("", line)
                         in_alternative_code_block = False
 
-            is_alternative_code_block_end = alternative_code_block_end_regex.match(line) is not None
-            if is_alternative_code_block_end:
+            if alternative_code_block_end_regex.match(line):  # only match beginning of line
                 # remove "```" from line
-                line = alternative_code_block_marker_regex.sub(line, "")
+                line = alternative_code_block_marker_regex.sub("", line)
                 in_alternative_code_block = False
 
         if is_snippet_language:
             # remove snippet language information
-            line = snippet_language_regex.sub(line, "")
+            line = snippet_language_regex.sub("", line)
 
         if is_inline_code_line:
             # replace leading and trailing backtick and HTML line break if present
@@ -380,6 +446,7 @@ def extract_text_blocks(post_edit_pair):
 
 
 def _revise_post_blocks(post_blocks):
+    post_blocks = list(post_blocks)
     marked_for_deletion = set()
 
     for i in range(len(post_blocks)):
@@ -431,21 +498,6 @@ def _revise_post_blocks(post_blocks):
     # remove post blocks marked for deletion
     for current_post_block in marked_for_deletion:
         post_blocks.remove(current_post_block)
-
-
-def add_comments(text_blocks_pair, comments):
-    """
-    Add comments to tuple of post_id and text blocks
-    :param text_blocks_pair: pair of post id and list of text blocks
-    :param comments: dict with comments per post id
-    :return: tuple of post_id and text_blocks
-    """
-    post_id, text_blocks = text_blocks_pair
-    post_comments = comments[post_id]
-    return post_id, {
-        "text_blocks": text_blocks,
-        "comments": post_comments
-    }
 
 
 class JsonSink(beam.io.FileBasedSink):
