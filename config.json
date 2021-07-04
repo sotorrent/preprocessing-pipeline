@@ -1,11 +1,16 @@
 {
-  "setup_file": "/Users/sebastian/git/sotorrent/pipeline/setup.py",
+  "setup_file": "/Users/sebastian/git/sotorrent/preprocessing-pipeline/setup.py",
   "save_main_session": true,
   "pipeline": {
-    "input_dir": "so_dump/",
-    "output_dir": "output/",
+    "input_dir": "gs://sotorrent_pipeline/so_dump/",
+    "output_dir": "gs://sotorrent_pipeline/output/",
     "pipeline_options": {
-      "runner": "DirectRunner"
+      "runner": "DataflowRunner",
+      "project": "sotorrent-org",
+      "region": "us-east1",
+      "temp_location": "gs://sotorrent_pipeline/temp/",
+      "staging_location": "gs://sotorrent_pipeline/staging/",
+      "job_name": "preprocessing-pipeline"
     }
   }
 }
