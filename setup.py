@@ -8,7 +8,7 @@ setuptools.setup(
     version='0.0.1',
     license='Apache-2.0',
     install_requires=[
-        'apache-beam>=2.28'
+        'apache-beam[gcp]>=2.28'
     ],
     packages=setuptools.find_packages(include=['preprocessing_pipeline', 'preprocessing_pipeline.*']),
     package_data={},
