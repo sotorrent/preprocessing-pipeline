@@ -33,3 +33,4 @@ dist/
 google-cloud-key.json
 output/
 build/
+/config_complete.json

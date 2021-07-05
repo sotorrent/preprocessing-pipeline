@@ -22,43 +22,47 @@ def run_pipeline(config):
     """
     logger.info(f"Writing output of pipeline to '{config.output_dir}'")
     logger.info(f"Reading and converting XML files from '{config.input_dir}'...")
-    with beam.Pipeline(options=config.get_pipeline_options()) as p:
-        post_scores = (p
-            | "Read posts XML file" >> beam.io.ReadFromText(config.posts_xml)
-            | "Ignore non-row post elements" >> beam.Filter(filter_rows)
-            | "Convert post XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
-            | "Extract relevant post attributes" >> beam.Map(extract_posts_attributes)
-            | "Group posts by post id" >> beam.GroupBy(get_post_id)
-            | "Extract score" >> beam.Map(extract_score))
 
-        comment_texts = (p
-            | "Read comment XML file" >> beam.io.ReadFromText(config.comments_xml)
-            | "Ignore non-row comment elements" >> beam.Filter(filter_rows)
-            | "Convert comment XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
-            | "Ignore comments with non-positive score" >> beam.Filter(filter_score)
-            | "Extract relevant comment attributes" >> beam.Map(extract_comment_attributes)
-            | "Group comments by post id" >> beam.GroupBy(get_post_id)
-            | "Extract comment text" >> beam.Map(extract_comment_text))
+    for dataset, input_paths in config.input_paths.items():
+        output_path = config.output_paths[dataset]
+        logger.info(f"Reading and converting XML files of dataset '{dataset}'...")
+        with beam.Pipeline(options=config.get_pipeline_options(dataset)) as p:
+            post_scores = (p
+                | "Read posts XML file" >> beam.io.ReadFromText(input_paths["posts"])
+                | "Ignore non-row post elements" >> beam.Filter(filter_rows)
+                | "Convert post XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
+                | "Extract relevant post attributes" >> beam.Map(extract_posts_attributes)
+                | "Group posts by post id" >> beam.GroupBy(get_post_id)
+                | "Extract score" >> beam.Map(extract_score))
 
-        post_text_blocks = (p
-            | "Read post history XML file" >> beam.io.ReadFromText(config.post_history_xml)
-            | "Ignore non-row post history elements" >> beam.Filter(filter_rows)
-            | "Convert post history XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
-            | "Filter post edits" >> beam.Filter(filter_post_edits)
-            | "Extract relevant post history attributes" >> beam.Map(extract_post_history_attributes)
-            | "Group post history by post id" >> beam.GroupBy(get_post_id)
-            | "Get most recent version for each post id" >> beam.Map(get_most_recent_version)
-            | "Extract text blocks" >> beam.Map(extract_text_blocks))
+            comment_texts = (p
+                | "Read comment XML file" >> beam.io.ReadFromText(input_paths["comments"])
+                | "Ignore non-row comment elements" >> beam.Filter(filter_rows)
+                | "Convert comment XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
+                | "Ignore comments with non-positive score" >> beam.Filter(filter_score)
+                | "Extract relevant comment attributes" >> beam.Map(extract_comment_attributes)
+                | "Group comments by post id" >> beam.GroupBy(get_post_id)
+                | "Extract comment text" >> beam.Map(extract_comment_text))
 
-        output_file_without_ext, _ = os.path.splitext(config.output_jsonl)
-        logger.info(f"Writing data to JSONL file '{config.output_jsonl}'")
-        (({
-            'post_score': post_scores, 'post_text_blocks': post_text_blocks, 'comment_texts': comment_texts
-        })
-            | "Merge post scores, text blocks, and comments" >> beam.CoGroupByKey()
-            | "Flatten grouped data" >> beam.Map(flatten_group)
-            | "Filter posts with positive score" >> beam.Filter(filter_score_grouped_pair)
-            | "Write text blocks to JSONL file" >> WriteToJson(output_file_without_ext))
+            post_text_blocks = (p
+                | "Read post history XML file" >> beam.io.ReadFromText(input_paths["post_history"])
+                | "Ignore non-row post history elements" >> beam.Filter(filter_rows)
+                | "Convert post history XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
+                | "Filter post edits" >> beam.Filter(filter_post_edits)
+                | "Extract relevant post history attributes" >> beam.Map(extract_post_history_attributes)
+                | "Group post history by post id" >> beam.GroupBy(get_post_id)
+                | "Get most recent version for each post id" >> beam.Map(get_most_recent_version)
+                | "Extract text blocks" >> beam.Map(extract_text_blocks))
+
+            output_path_without_ext, _ = os.path.splitext(output_path)
+            logger.info(f"Writing data to JSONL file '{output_path}'")
+            (({
+                'post_score': post_scores, 'post_text_blocks': post_text_blocks, 'comment_texts': comment_texts
+            })
+                | "Merge post scores, text blocks, and comments" >> beam.CoGroupByKey()
+                | "Flatten grouped data" >> beam.Map(flatten_group)
+                | "Filter posts with positive score" >> beam.Filter(filter_score_grouped_pair)
+                | "Write text blocks to JSONL file" >> WriteToJson(output_path_without_ext))
 
     logger.info(f"Pipeline finished.")
 

@@ -1,8 +1,11 @@
 {
   "setup_file": "/Users/sebastian/git/sotorrent/preprocessing-pipeline/setup.py",
   "save_main_session": true,
+  "datasets": [
+      "stackoverflow.com"
+  ],
   "pipeline": {
-    "input_dir": "gs://sotorrent_pipeline/so_dump/",
+    "input_dir": "gs://stackoverflow-models/stackexchange",
     "output_dir": "gs://sotorrent_pipeline/output/",
     "pipeline_options": {
       "runner": "DataflowRunner",

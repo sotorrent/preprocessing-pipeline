@@ -1,3 +1,4 @@
+import copy
 import json
 import logging
 import os
@@ -23,22 +24,40 @@ class Config:
             self.save_main_session = json_config['save_main_session']
             self.pipeline = json_config['pipeline']
             self.input_dir = self.pipeline['input_dir']
-            self.post_history_xml = os.path.join(self.input_dir, 'PostHistory.xml')
-            self.posts_xml = os.path.join(self.input_dir, 'Posts.xml')
-            self.comments_xml = os.path.join(self.input_dir, 'Comments.xml')
             self.output_dir = self.pipeline['output_dir']
-            self.output_jsonl = os.path.join(self.output_dir, 'output.jsonl')
+            self.input_paths = dict()
+            self.output_paths = dict()
+            self.datasets = json_config['datasets']
+            self._generate_file_paths()
         logger.info("Configuration initialized.")
 
-    def get_pipeline_options(self):
+    def _generate_file_paths(self):
         """
-        Get configured pipeline options
+        Generate file paths for configured input and output table files.
+        :return: None
+        """
+        for dataset in self.datasets:
+            logger.info(f"Generating input and output paths for dataset '{dataset}'...")
+            self.input_paths[dataset] = {
+                "posts": os.path.join(self.pipeline['input_dir'], dataset, 'Posts.xml'),
+                "comments": os.path.join(self.pipeline['input_dir'], dataset, 'Comments.xml'),
+                "post_history": os.path.join(self.pipeline['input_dir'], dataset, 'PostHistory.xml')
+            }
+            self.output_paths[dataset] = os.path.join(self.pipeline['output_dir'], f'{dataset}.jsonl')
+        logger.info(f"Generated {len(self.input_paths)} input paths and {len(self.output_paths)} output paths.")
+
+    def get_pipeline_options(self, dataset):
+        """
+        Get pipeline options for active pipeline
+        :param dataset: Name of currently processed dataset
         :return:
         """
-        logger.info(f"Generating pipeline options...")
-        pipeline_options = PipelineOptions.from_dictionary(self.pipeline['pipeline_options'])
+        logger.info(f"Generating pipeline options for dataset '{dataset}'...")
+        pipeline_options_dict = copy.deepcopy(self.pipeline['pipeline_options'])
+        pipeline_options_dict['job_name'] = f"{pipeline_options_dict['job_name']}-{str(dataset).lower()}"
+        pipeline_options = PipelineOptions.from_dictionary(pipeline_options_dict)
         pipeline_options.view_as(SetupOptions).setup_file = self.setup_file
         if self.save_main_session:
             pipeline_options.view_as(SetupOptions).save_main_session = True
-        logger.info(f"Pipeline options generated.")
+        logger.info(f"Pipeline options for dataset '{dataset}' generated.")
         return pipeline_options
