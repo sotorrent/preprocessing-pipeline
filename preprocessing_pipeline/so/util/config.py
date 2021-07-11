@@ -43,7 +43,7 @@ class Config:
                 "comments": os.path.join(self.pipeline['input_dir'], dataset, 'Comments.xml'),
                 "post_history": os.path.join(self.pipeline['input_dir'], dataset, 'PostHistory.xml')
             }
-            self.output_paths[dataset] = os.path.join(self.pipeline['output_dir'], f'{dataset}.jsonl')
+            self.output_paths[dataset] = os.path.join(self.pipeline['output_dir'], dataset, f'{dataset}.jsonl')
         logger.info(f"Generated {len(self.input_paths)} input paths and {len(self.output_paths)} output paths.")
 
     def get_pipeline_options(self, dataset):
