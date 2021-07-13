@@ -40,3 +40,5 @@ alternative_code_block_end_regex = re.compile(r"(```)\s*$")
 alternative_code_block_marker_regex = re.compile(r"```")
 
 contains_letter_or_digit_regex = re.compile(r"[a-zA-Z0-9]")
+
+job_name_regex = re.compile(r"[^-a-z0-9]+")

@@ -6,6 +6,8 @@ import sys
 
 from apache_beam.options.pipeline_options import PipelineOptions, SetupOptions
 
+from preprocessing_pipeline.so.util.regex import job_name_regex
+
 LOG_LEVEL = logging.INFO
 logger = logging.getLogger(__name__)
 
@@ -54,7 +56,9 @@ class Config:
         """
         logger.info(f"Generating pipeline options for dataset '{dataset}'...")
         pipeline_options_dict = copy.deepcopy(self.pipeline['pipeline_options'])
-        pipeline_options_dict['job_name'] = f"{pipeline_options_dict['job_name']}-{str(dataset).lower()}"
+
+        valid_job_name = job_name_regex.sub("", str(dataset).lower())
+        pipeline_options_dict['job_name'] = f"{pipeline_options_dict['job_name']}-{valid_job_name}"
         pipeline_options = PipelineOptions.from_dictionary(pipeline_options_dict)
         pipeline_options.view_as(SetupOptions).setup_file = self.setup_file
         if self.save_main_session:
