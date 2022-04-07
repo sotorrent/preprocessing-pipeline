@@ -13,4 +13,4 @@ First, you need to install the preprocessing_pipeline package:
 
 Then, you can run the pipeline:
 
-    preprocessing-pipeline --config_file "/Users/sebastian/git/sotorrent/preprocessing-pipeline/config.json"
+    preprocessing-pipeline --config_file "$PWD/config.json"
