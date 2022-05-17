@@ -1,0 +1,31 @@
+[
+    3758880,
+    {
+        "score": 1384,
+        "text_blocks": [
+            "> **Fun fact:** The original snippet posted here was the most copied Java snippet of all time on Stack Overflow, and it was flawed. It was fixed, but it got messy.\n>\n> Full story in this article: [The most copied Stack Overflow snippet of all time is flawed!][1]\nSource: [Formatting byte size to human readable format | Programming.Guide][2]\n# SI (1 k = 1,000)",
+            "# Binary (1 Ki = 1,024)",
+            "# Example output:",
+            "  [1]: https://programming.guide/worlds-most-copied-so-snippet.html\n  [2]: http://programming.guide/java/formatting-byte-size-to-human-readable-format.html"
+        ],
+        "comments": [
+            "The only thing I don't like about it is that 1.0 KB could be displayed prettier as 1 KB. (Which is why I use DecimalFormat in my answer)",
+            "I prefer 1.0 KB. Then it's clear how many significant figures the output entails. (This also seems to be the behavior of for instance the `du` command in Linux.)",
+            "I think every one should note that in your project customer want see values in base 2 (devided by 1024) but with common prefix. Not KiB, MiB, GiB etc. Use KB, MB, GB, TB for it.",
+            "@Mazyod For iOS developers, you can use [NSByteCountFormatter](https://developer.apple.com/library/ios/documentation/Foundation/Reference/NSByteCountFormatter_Class/index.html). \n\nFor example (in swift):\n\n`let bytes = 110592\nNSByteCountFormatter.stringFromByteCount(Int64(bytes), countStyle: NSByteCountFormatterCountStyle.File)`\nwould produce \"111 KB\"",
+            "The code is short, but `charAt`, `?` operator and `String.format` to get the unit isn't human readable ...",
+            "@Borys Using \"KB\" to mean \"1024 bytes\" is wrong.  Don't do that.",
+            "@endolith that's an example of prescriptivism vs descriptivism",
+            "@endolith not denying it's \"wrong\" according to the IEC standard. However, its usage is rare compared to the popular usage of MB to mean 1024*1024 bytes. \"MB\" is used by Windows, for example. Using MiB, although correct (according to IEC), may confuse readers who are unfamiliar with it. It all depends on who your audience is. Anyway, let's not let this detract from my main criticism, which is that this method can produce incorrect results.",
+            "Readers will learn it. Better something they are unfamiliar with and can learn it than having something wrong. Writing KB a user who is familiar with it will expect 1000 and a user who is unfamiliar will expect 1024.",
+            "@KlitosKyriacou \"But we know what it means so it's not a big problem\" -- I have lost count of the number of times I've spoken with people who think they knew which unit they meant but when questioned they don't have a clue and/or disagree with the person they thought they were in agreement with. Use SI units for base 10 and IEC for base 2 and the world will be a better place.",
+            "**Answer rewritten entirely. Many of the above comments are obsolete.**",
+            "Wow :D In your article (really fun read BTW) you've written: \"After ironing out all corner cases the code is even less readable than the original version. Personally I would not copy this snippet into production code.\" I don't see how is the new snippet more readable :D What are the other reasons that back up this code over the previous one? Performance? Being concise and still without rounding bugs?",
+            "@matvs Ok, I admit that I might have golfed the new version a bit too far. It's not super readable, but it's fairly clear that it's nothing but an unrolled loop at this point.\n\nFirst of all, this version is _correct_, and I'd argue that it's far less complicated than the previous version. For example, the really funky floating point stuff is gone. The log/pow stuff (which was fun to write but not fun to read) is gone. The si/binary flag (which adds to the complexity but that you typically never care about) is gone.\n\nAs for performance, I have no idea :-) Someone should profile it.",
+            "@slonik, no, kilo is abbreviated with lower-case k. This is the [official publication](https://www.nist.gov/pml/special-publication-330/sp-330-section-3#table7) from nist.gov",
+            "@KlitosKyriacou \"But officer, I *wasn't* speeding!  By *my* definition of 'kilometer', I was only going 5 km/h.\"",
+            "@endolith I think a better analogy might be the definition of calories. When a can of diet drink says it contains \"Less than 1 calorie\", it uses the colloquial and common definition of \"calorie\" - it really means kilocalorie. But we know what it means so it's not a big problem.",
+            "@KlitosKyriacou But is that 1000 calories or 1024 calories?  Units of measurement *are* prescriptive; they wouldn't work otherwise.  \"kilo-\" has meant \"1000\" for thousands of years.  Using it to refer to 1024 of something is wrong."
+        ]
+    }
+]
