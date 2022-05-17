@@ -1,5 +1,5 @@
 {
-  "setup_file": "/Users/sebastian/git/sotorrent/preprocessing-pipeline/setup.py",
+  "setup_file": "./setup.py",
   "save_main_session": true,
   "datasets": [
     "ai.stackexchange.com",
