@@ -27,42 +27,51 @@ def run_pipeline(config):
         output_path = config.output_paths[dataset]
         logger.info(f"Reading and converting XML files of dataset '{dataset}'...")
         with beam.Pipeline(options=config.get_pipeline_options(dataset)) as p:
-            post_scores = (p
-                | "Read posts XML file" >> beam.io.ReadFromText(input_paths["posts"])
-                | "Ignore non-row post elements" >> beam.Filter(filter_rows)
-                | "Convert post XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
-                | "Extract relevant post attributes" >> beam.Map(extract_posts_attributes)
-                | "Group posts by post id" >> beam.GroupBy(get_post_id)
-                | "Extract score" >> beam.Map(extract_score))
+            answer_metadata = (p
+                           | "Read posts XML file (answers)" >> beam.io.ReadFromText(input_paths["posts"])
+                           | "Ignore non-row post elements (answers)" >> beam.Filter(filter_rows)
+                           | "Convert post XML attributes to dict elements (answers)" >> beam.Map(xml_attributes_to_dict)
+                           | "Filter answers" >> beam.Filter(filter_answers)
+                           | "Extract relevant answer attributes" >> beam.Map(extract_answer_attributes)
+                           | "Group answers by post id" >> beam.GroupBy(get_post_id)
+                           | "Flatten answer dict" >> beam.Map(flatten_answer))
 
-            comment_texts = (p
-                | "Read comment XML file" >> beam.io.ReadFromText(input_paths["comments"])
-                | "Ignore non-row comment elements" >> beam.Filter(filter_rows)
-                | "Convert comment XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
-                | "Ignore comments with non-positive score" >> beam.Filter(filter_score)
-                | "Extract relevant comment attributes" >> beam.Map(extract_comment_attributes)
-                | "Group comments by post id" >> beam.GroupBy(get_post_id)
-                | "Extract comment text" >> beam.Map(extract_comment_text))
+            question_metadata = (p
+                           | "Read posts XML file (questions)" >> beam.io.ReadFromText(input_paths["posts"])
+                           | "Ignore non-row post elements (questions)" >> beam.Filter(filter_rows)
+                           | "Convert post XML attributes to dict elements (questions)" >> beam.Map(xml_attributes_to_dict)
+                           | "Filter questions" >> beam.Filter(filter_questions)
+                           | "Extract relevant question attributes" >> beam.Map(extract_question_attributes)
+                           | "Group questions by post id" >> beam.GroupBy(get_post_id)
+                           | "Flatten question dict" >> beam.Map(flatten_question))
 
-            post_text_blocks = (p
-                | "Read post history XML file" >> beam.io.ReadFromText(input_paths["post_history"])
-                | "Ignore non-row post history elements" >> beam.Filter(filter_rows)
-                | "Convert post history XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
-                | "Filter post edits" >> beam.Filter(filter_post_edits)
-                | "Extract relevant post history attributes" >> beam.Map(extract_post_history_attributes)
-                | "Group post history by post id" >> beam.GroupBy(get_post_id)
-                | "Get most recent version for each post id" >> beam.Map(get_most_recent_version)
-                | "Extract text blocks" >> beam.Map(extract_text_blocks))
+            post_metadata = (({
+                 'answer_metadata': answer_metadata, 'question_metadata': question_metadata
+            })
+              | "Merge answer and question metadata" >> beam.CoGroupByKey()
+              | "Flatten grouped post metadata" >> beam.Map(flatten_post_metadata)
+              | "Flatten answer lists" >> beam.FlatMap(get_list_elements)
+            )
+
+            post_code_blocks = (p
+                                | "Read post history XML file" >> beam.io.ReadFromText(input_paths["post_history"])
+                                | "Ignore non-row post history elements" >> beam.Filter(filter_rows)
+                                | "Convert post history XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
+                                | "Filter post edits" >> beam.Filter(filter_post_edits)
+                                | "Extract relevant post history attributes" >> beam.Map(extract_post_history_attributes)
+                                | "Group post history by post id" >> beam.GroupBy(get_post_id)
+                                | "Get most recent version for each post id" >> beam.Map(get_most_recent_version)
+                                | "Extract code blocks" >> beam.Map(extract_code_blocks))
 
             output_path_without_ext, _ = os.path.splitext(output_path)
             logger.info(f"Writing data to JSONL file '{output_path}'")
             (({
-                'post_score': post_scores, 'post_text_blocks': post_text_blocks, 'comment_texts': comment_texts
+                'post_metadata': post_metadata, 'post_code_blocks': post_code_blocks
             })
-                | "Merge post scores, text blocks, and comments" >> beam.CoGroupByKey()
-                | "Flatten grouped data" >> beam.Map(flatten_group)
-                | "Filter posts with positive score" >> beam.Filter(filter_score_grouped_pair)
-                | "Write text blocks to JSONL file" >> WriteToJson(output_path_without_ext))
+                | "Merge post scores and code blocks" >> beam.CoGroupByKey()
+                | "Flatten grouped post data" >> beam.Map(flatten_post_data)
+                | "Filter Java posts" >> beam.Filter(filter_java_posts)
+                | "Write code blocks to JSONL file" >> WriteToJson(output_path_without_ext))
 
     logger.info(f"Pipeline finished.")
 
@@ -94,6 +103,24 @@ def filter_post_edits(dict_elem):
     return int(dict_elem['PostHistoryTypeId']) in [2, 5, 8]
 
 
+def filter_questions(dict_elem):
+    """
+    Filter question posts.
+    :param dict_elem: dict with parsed XML attributes
+    :return: boolean indicating whether the post is a question
+    """
+    return int(dict_elem['PostTypeId']) == 1
+
+
+def filter_answers(dict_elem):
+    """
+    Filter answer posts.
+    :param dict_elem: dict with parsed XML attributes
+    :return: boolean indicating whether the post is an answer
+    """
+    return int(dict_elem['PostTypeId']) == 2
+
+
 def filter_score(dict_elem):
     """
     Filter post/comment elements with a positive score.
@@ -103,11 +130,71 @@ def filter_score(dict_elem):
     return int(dict_elem['Score']) > 0
 
 
-def flatten_group(post_group):
+def filter_java_posts(post_pair):
+    """
+    Filter post elements with a Java tag.
+    :param post_pair: pair with post_id, dict with post metadata and code blocks
+    :return: boolean indicating whether post has a Java tag
+    """
+    _, data = post_pair
+    return '<java>' in data['tags']
+
+
+def flatten_post_metadata(post_metadata_group):
+    """
+    Flatten lists in grouped post metadata.
+    :param post_group: List with thread metadata (parent id) and lists containing post id, post score and tags
+    :return: pair of post_id and dict with post score and tags
+    """
+    post_metadata_group = list(post_metadata_group)
+
+    if len(post_metadata_group) != 2:
+        error_message = f"Post metadata group did not have correct format (more than two root elements): {post_metadata_group}"
+        logger.error(error_message)
+        sys.exit(error_message)
+
+    parent_id = int(post_metadata_group[0])
+    metadata_dict = dict(post_metadata_group[1])
+
+    if 'answer_metadata' not in metadata_dict or 'question_metadata' not in metadata_dict:
+        error_message = f"Post metadata group did not have correct format (key missing): {post_metadata_group}"
+        logger.error(error_message)
+        sys.exit(error_message)
+
+    answer_metadata_list = list(metadata_dict['answer_metadata'])
+    question_metadata_list = list(metadata_dict['question_metadata'])
+
+    if len(question_metadata_list) != 1:
+        error_message = f"Post metadata group did not have correct format (invalid number of questions): {post_metadata_group}"
+        logger.error(error_message)
+        sys.exit(error_message)
+
+    question_metadata = dict(question_metadata_list[0])
+    result_list = []
+
+    for answer_metadata in answer_metadata_list:
+        post_id = int(answer_metadata['post_id'])
+        post_type = "a"
+        result_list.append(
+            (post_id, [parent_id, post_type, answer_metadata['score'], question_metadata['tags']])
+        )
+
+    result_list.append(
+        (parent_id, [parent_id, "q", question_metadata['score'], question_metadata['tags']])
+    )
+
+    return result_list
+
+
+def get_list_elements(input_list):
+    return input_list
+
+
+def flatten_post_data(post_group):
     """
     Flatten lists in grouped post data.
-    :param post_group: List with post score and lists containing post score, text blocks, and comment texts.
-    :return: pair of post_id and dict with post score, text blocks, and comment texts.
+    :param post_group: List with post metadata and lists containing post score, tags, and code blocks
+    :return: pair of post_id and dict with post score, tags, and code blocks.
     """
     post_group = list(post_group)
 
@@ -119,29 +206,30 @@ def flatten_group(post_group):
     post_id = int(post_group[0])
     post_dict = dict(post_group[1])
 
-    if 'post_score' not in post_dict or 'post_text_blocks' not in post_dict or 'comment_texts' not in post_dict:
+    if 'post_metadata' not in post_dict or 'post_code_blocks' not in post_dict:
         error_message = f"Post group did not have correct format (key missing): {post_group}"
         logger.error(error_message)
         sys.exit(error_message)
 
-    post_score_list = list(post_dict['post_score'])
-    post_text_blocks_list = list(post_dict['post_text_blocks'])
-    comment_texts_list = list(post_dict['comment_texts'])
+    post_metadata_list = list(itertools.chain(*post_dict['post_metadata']))
+    post_code_blocks_list = list(itertools.chain(*post_dict['post_code_blocks']))
 
-    if len(post_score_list) > 1:
-        error_message = f"Post group did not have correct format (multiple post scores): {post_group}"
+    if len(post_metadata_list) != 4:
+        error_message = f"Post group did not have correct format (post metadata has wrong size): {post_group}"
         logger.error(error_message)
         sys.exit(error_message)
 
-    if len(post_score_list) > 0:
-        post_score = int(post_score_list[0])
-    else:
-        post_score = None
+    parent_id = int(post_metadata_list[0])
+    post_type = post_metadata_list[1]
+    post_score = int(post_metadata_list[2])
+    post_tags = post_metadata_list[3]
 
     return post_id, {
+        'parent_id': parent_id,
+        'post_type': post_type,
         'score': post_score,
-        'text_blocks': list(itertools.chain(*post_text_blocks_list)),
-        'comments': list(itertools.chain(*comment_texts_list))
+        'tags': post_tags,
+        'code_blocks': post_code_blocks_list
     }
 
 
@@ -174,15 +262,29 @@ def extract_post_history_attributes(dict_elem):
     }
 
 
-def extract_posts_attributes(dict_elem):
+def extract_answer_attributes(dict_elem):
     """
-    Select the attributes of interest from the post history attribute dict.
+    Select the attributes of interest from the post attribute dict.
     :param dict_elem: dict with parsed XML attributes
     :return: dict with selection of parsed XML attributes
     """
     return {
         'PostId': int(dict_elem['Id']),
-        'Score': dict_elem['Score']
+        'ParentId': int(dict_elem['ParentId']),
+        'Score': dict_elem['Score'],
+    }
+
+
+def extract_question_attributes(dict_elem):
+    """
+    Select the attributes of interest from the post attribute dict.
+    :param dict_elem: dict with parsed XML attributes
+    :return: dict with selection of parsed XML attributes
+    """
+    return {
+        'PostId': int(dict_elem['Id']),
+        'Tags': dict_elem['Tags'],
+        'Score': dict_elem['Score'],
     }
 
 
@@ -209,20 +311,34 @@ def extract_comment_text(comment_pair):
     return post_id, list(map(lambda comment_dict: comment_dict['Text'], comment_dicts))
 
 
-def extract_score(post_pair):
+def flatten_answer(post_pair):
     """
-    Reduce the right-hand side of the pair to the score alone (without post id).
+    Use parent id as left-hand side of the pair.
+    Reduce the right-hand side of the pair to the score (without post id).
     :param post_pair: Pair of post_id, dict with parse attributes
-    :return: pair of post_id, score
+    :return: pair of parent_id, [post_id, score]
     """
     post_id, post_dicts = post_pair
-    post_dicts = list(post_dicts)
+    post_dict = list(post_dicts)[0]
+    return post_dict['ParentId'],  {
+        "post_id": post_id,
+        "score": post_dict['Score']
+    }
 
-    if len(post_dicts) == 1:
-        return post_id,  post_dicts[0]['Score']
-    else:
-        logger.warning(f"Post {post_id} has more than one score, ignoring scores.")
-        return post_id, None
+
+def flatten_question(post_pair):
+    """
+    Use post id as left-hand side of the pair.
+    Reduce the right-hand side of the pair to the tags (without post id).
+    :param post_pair: Pair of post_id, dict with parse attributes
+    :return: pair of post_id, [tags]
+    """
+    post_id, post_dicts = post_pair
+    post_dict = list(post_dicts)[0]
+    return post_id,  {
+        "tags": post_dict['Tags'],
+        "score": post_dict['Score']
+    }
 
 
 def get_post_id(dict_elem):
@@ -247,9 +363,9 @@ def get_most_recent_version(post_edits_pair):
     return post_id, post_edits[0]
 
 
-def extract_text_blocks(post_edit_pair):
+def extract_code_blocks(post_edit_pair):
     """
-    Extracts all text blocks from the Markdown source of a post version
+    Extracts all code blocks from the Markdown source of a post version
     :param post_edit_pair: pair of post id, attribute dict element of most recent version
     :return: tuple of post_id and text_blocks
     """
@@ -443,7 +559,7 @@ def extract_text_blocks(post_edit_pair):
 
     return post_id, list(
         map(lambda block: block.content,
-            filter(lambda block: isinstance(block, TextBlock),
+            filter(lambda block: isinstance(block, CodeBlock),
                    post_blocks)
             )
     )
