@@ -9,7 +9,7 @@ To run the pipeline in Google Cloud, you need to set the following environment v
 
 First, you need to install the preprocessing_pipeline package:
 
-    python3 setup.py install
+    pip3 install .
 
 Then, you can run the pipeline:
 
