@@ -71,7 +71,7 @@ def run_pipeline(config):
                 | "Merge post scores and code blocks" >> beam.CoGroupByKey()
                 | "Flatten grouped post data" >> beam.Map(flatten_post_data)
                 | "Filter Java posts" >> beam.Filter(filter_java_posts)
-                | "Filter nonempty code blocks" >> beam.Filter(filter_nonempty_blocks)
+                | "Filter non-empty code blocks" >> beam.Filter(filter_non_empty_blocks)
                 | "Write code blocks to JSONL file" >> WriteToJson(output_path_without_ext))
 
     logger.info(f"Pipeline finished.")
@@ -141,14 +141,14 @@ def filter_java_posts(post_pair):
     return '<java>' in data['tags']
 
 
-def filter_nonempty_blocks(post_pair):
+def filter_non_empty_blocks(post_pair):
     """
-    Filters out code_blocks that have no snippets
+    Filters out posts that have at least one code block.
     :param post_pair: pair with post_id, dict with post metadata and code blocks
-    :return: boolean indicating whether post has snippets
+    :return: boolean indicating whether post has at least one code block
     """
     _, data = post_pair
-    return len(data['code_blocks']) != 0
+    return len(data['code_blocks']) > 0
 
 
 def flatten_post_metadata(post_metadata_group):
