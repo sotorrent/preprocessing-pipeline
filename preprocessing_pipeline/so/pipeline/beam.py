@@ -27,6 +27,7 @@ def run_pipeline(config):
         output_path = config.output_paths[dataset]
         logger.info(f"Reading and converting XML files of dataset '{dataset}'...")
         with beam.Pipeline(options=config.get_pipeline_options(dataset)) as p:
+
             question_metadata = (p
                             | "Read posts XML file (questions)" >> beam.io.ReadFromText(input_paths["posts"])
                             | "Ignore non-row post elements (questions)" >> beam.Filter(filter_rows)
@@ -54,7 +55,7 @@ def run_pipeline(config):
               | "Merge answer and question metadata" >> beam.CoGroupByKey()
               | "Filter out non-java entries" >> beam.Filter(filter_java_post_pairs)
               | "Flatten grouped post metadata" >> beam.Map(flatten_post_metadata)
-              | "Flatten answer lists" >> beam.FlatMap(get_list_elements)
+              | "Flatten post lists" >> beam.FlatMap(get_list_elements)
             )
 
             post_code_blocks = (p
