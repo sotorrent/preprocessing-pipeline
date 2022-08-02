@@ -50,7 +50,7 @@ def run_pipeline(config):
             })
               | "Merge answer and question metadata" >> beam.CoGroupByKey()
               | "Flatten grouped post metadata" >> beam.Map(flatten_post_metadata)
-              | "Flatten answer lists" >> beam.FlatMap(get_list_elements)
+              | "Flatten post lists" >> beam.FlatMap(get_list_elements)
             )
 
             post_code_blocks = (p
