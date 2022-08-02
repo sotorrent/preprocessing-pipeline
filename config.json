@@ -5,10 +5,14 @@
     "stackoverflow.com"
   ],
   "pipeline": {
-    "input_dir": "./datasets/",
-    "output_dir": "./output/",
+    "input_dir": "gs://so-post-data/datasets/",
+    "output_dir": "gs://so-post-data/output/",
     "pipeline_options": {
-      "runner": "DirectRunner",
+      "runner": "DataflowRunner",
+      "project": "surprisal-se",
+      "region": "us-east1",
+      "temp_location": "gs://so-post-data/temp/",
+      "staging_location": "gs://so-post-data/staging/",
       "job_name": "preprocessing-pipeline"
     }
   }
