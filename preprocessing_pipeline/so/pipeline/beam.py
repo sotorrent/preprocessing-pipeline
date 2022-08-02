@@ -27,28 +27,32 @@ def run_pipeline(config):
         output_path = config.output_paths[dataset]
         logger.info(f"Reading and converting XML files of dataset '{dataset}'...")
         with beam.Pipeline(options=config.get_pipeline_options(dataset)) as p:
-            answer_metadata = (p
-                           | "Read posts XML file (answers)" >> beam.io.ReadFromText(input_paths["posts"])
-                           | "Ignore non-row post elements (answers)" >> beam.Filter(filter_rows)
-                           | "Convert post XML attributes to dict elements (answers)" >> beam.Map(xml_attributes_to_dict)
-                           | "Filter answers" >> beam.Filter(filter_answers)
-                           | "Extract relevant answer attributes" >> beam.Map(extract_answer_attributes)
-                           | "Group answers by post id" >> beam.GroupBy(get_post_id)
-                           | "Flatten answer dict" >> beam.Map(flatten_answer))
-
             question_metadata = (p
-                           | "Read posts XML file (questions)" >> beam.io.ReadFromText(input_paths["posts"])
-                           | "Ignore non-row post elements (questions)" >> beam.Filter(filter_rows)
-                           | "Convert post XML attributes to dict elements (questions)" >> beam.Map(xml_attributes_to_dict)
-                           | "Filter questions" >> beam.Filter(filter_questions)
-                           | "Extract relevant question attributes" >> beam.Map(extract_question_attributes)
-                           | "Group questions by post id" >> beam.GroupBy(get_post_id)
-                           | "Flatten question dict" >> beam.Map(flatten_question))
+                            | "Read posts XML file (questions)" >> beam.io.ReadFromText(input_paths["posts"])
+                            | "Ignore non-row post elements (questions)" >> beam.Filter(filter_rows)
+                            | "Convert post XML attributes to dict elements (questions)" >> beam.Map(
+                            xml_attributes_to_dict)
+                            | "Filter questions" >> beam.Filter(filter_questions)
+                            | "Extract relevant question attributes" >> beam.Map(extract_question_attributes)
+                            | "Group questions by post id" >> beam.GroupBy(get_post_id)
+                            | "Filter java tags" >> beam.Filter(filter_java_tags)
+                            | "Flatten question dict" >> beam.Map(flatten_question)
+                            | "Remove tags" >> beam.Map(remove_tags))
+
+            answer_metadata = (p
+                            | "Read posts XML file (answers)" >> beam.io.ReadFromText(input_paths["posts"])
+                            | "Ignore non-row post elements (answers)" >> beam.Filter(filter_rows)
+                            | "Convert post XML attributes to dict elements (answers)" >> beam.Map(xml_attributes_to_dict)
+                            | "Filter answers" >> beam.Filter(filter_answers)
+                            | "Extract relevant answer attributes" >> beam.Map(extract_answer_attributes)
+                            | "Group answers by post id" >> beam.GroupBy(get_post_id)
+                            | "Flatten answer dict" >> beam.Map(flatten_answer))
 
             post_metadata = (({
                  'answer_metadata': answer_metadata, 'question_metadata': question_metadata
             })
               | "Merge answer and question metadata" >> beam.CoGroupByKey()
+              | "Filter out non-java entries" >> beam.Filter(filter_java_post_pairs)
               | "Flatten grouped post metadata" >> beam.Map(flatten_post_metadata)
               | "Flatten answer lists" >> beam.FlatMap(get_list_elements)
             )
@@ -57,11 +61,17 @@ def run_pipeline(config):
                                 | "Read post history XML file" >> beam.io.ReadFromText(input_paths["post_history"])
                                 | "Ignore non-row post history elements" >> beam.Filter(filter_rows)
                                 | "Convert post history XML attributes to dict elements" >> beam.Map(xml_attributes_to_dict)
+                                | "Extract relevant post history attributes" >> beam.Map(
+                        extract_post_history_attributes)
                                 | "Filter post edits" >> beam.Filter(filter_post_edits)
-                                | "Extract relevant post history attributes" >> beam.Map(extract_post_history_attributes)
+                                | "Remove PostHistoryTypeId column" >> beam.Map(remove_post_history_id)
                                 | "Group post history by post id" >> beam.GroupBy(get_post_id)
                                 | "Get most recent version for each post id" >> beam.Map(get_most_recent_version)
-                                | "Extract code blocks" >> beam.Map(extract_code_blocks))
+                                | "Remove CreationDate column" >> beam.Map(remove_creation_date)
+                                | "Extract code blocks" >> beam.Map(extract_code_blocks)
+                                | "Remove empty code blocks" >> beam.Filter(filter_nonempty_blocks)
+                                | "Strip code blocks" >> beam.Filter(strip_code_blocks)
+                                )
 
             output_path_without_ext, _ = os.path.splitext(output_path)
             logger.info(f"Writing data to JSONL file '{output_path}'")
@@ -69,9 +79,9 @@ def run_pipeline(config):
                 'post_metadata': post_metadata, 'post_code_blocks': post_code_blocks
             })
                 | "Merge post scores and code blocks" >> beam.CoGroupByKey()
+                | "Filter empty post metadata" >> beam.Filter(filter_empty_post_metadata)
                 | "Flatten grouped post data" >> beam.Map(flatten_post_data)
-                | "Filter Java posts" >> beam.Filter(filter_java_posts)
-                | "Filter nonempty code blocks" >> beam.Filter(filter_nonempty_blocks)
+                | "Remove empty entries" >> beam.Filter(remove_empty_posts)
                 | "Write code blocks to JSONL file" >> WriteToJson(output_path_without_ext))
 
     logger.info(f"Pipeline finished.")
@@ -104,6 +114,22 @@ def filter_post_edits(dict_elem):
     return int(dict_elem['PostHistoryTypeId']) in [2, 5, 8]
 
 
+def remove_post_history_id(dict_elem):
+    """
+    Once columns a not longer necessary, stash them
+    """
+    if 'Text' in dict_elem:
+        text = dict_elem['Text']
+    else:
+        text = ""
+
+    return {
+        'PostId': int(dict_elem['PostId']),
+        'CreationDate': dict_elem['CreationDate'],
+        'Text': text,
+    }
+
+
 def filter_questions(dict_elem):
     """
     Filter question posts.
@@ -131,14 +157,8 @@ def filter_score(dict_elem):
     return int(dict_elem['Score']) > 0
 
 
-def filter_java_posts(post_pair):
-    """
-    Filter post elements with a Java tag.
-    :param post_pair: pair with post_id, dict with post metadata and code blocks
-    :return: boolean indicating whether post has a Java tag
-    """
-    _, data = post_pair
-    return '<java>' in data['tags']
+def filter_java_tags(post_pair):
+    return '<java>' in post_pair[1][0]["Tags"]
 
 
 def filter_nonempty_blocks(post_pair):
@@ -147,8 +167,33 @@ def filter_nonempty_blocks(post_pair):
     :param post_pair: pair with post_id, dict with post metadata and code blocks
     :return: boolean indicating whether post has snippets
     """
-    _, data = post_pair
-    return len(data['code_blocks']) != 0
+    _, code_blocks = post_pair
+    return len(code_blocks) != 0
+
+
+def strip_code_blocks(post_pair):
+    """
+    Attempt to clean up data as much as possible before the heavy step
+    "Merge post scores and code blocks" >> beam.CoGroupByKey() is invoked
+    """
+    _, code_blocks = post_pair
+    code_blocks = [block.strip() for block in code_blocks]
+    return _, code_blocks
+
+
+def filter_java_post_pairs(post_metadata_group):
+    """
+    Remove question/answer pairs that are not related to Java.
+    The "Merge answer and question metadata" >> beam.CoGroupByKey() step matches questions and answers. However,
+    the "Filter java tags" >> beam.Filter(filter_java_tags) used to generate question_metadata causes the
+    "Merge answer and question metadata" >> beam.CoGroupByKey() step to generate entries whose question_metadata list
+    is empty, which is not accepted by the "Flatten grouped post metadata" >> beam.Map(flatten_post_metadata) step.
+    e.g.: [5304668, {'answer_metadata': [{'post_id': 9875710, 'score': '0'}], 'question_metadata': []}] is a JS, and
+    not a Java question/answer pair
+
+    Further down the line, another transformation to remove empty post_metadata will be necessary
+    """
+    return len(post_metadata_group[1]["question_metadata"]) != 0
 
 
 def flatten_post_metadata(post_metadata_group):
@@ -187,11 +232,11 @@ def flatten_post_metadata(post_metadata_group):
         post_id = int(answer_metadata['post_id'])
         post_type = "a"
         result_list.append(
-            (post_id, [parent_id, post_type, answer_metadata['score'], question_metadata['tags']])
+            (post_id, [parent_id, post_type, answer_metadata['score']])
         )
 
     result_list.append(
-        (parent_id, [parent_id, "q", question_metadata['score'], question_metadata['tags']])
+        (parent_id, [parent_id, "q", question_metadata['score']])
     )
 
     return result_list
@@ -225,7 +270,7 @@ def flatten_post_data(post_group):
     post_metadata_list = list(itertools.chain(*post_dict['post_metadata']))
     post_code_blocks_list = list(itertools.chain(*post_dict['post_code_blocks']))
 
-    if len(post_metadata_list) != 4:
+    if len(post_metadata_list) != 3:
         error_message = f"Post group did not have correct format (post metadata has wrong size): {post_group}"
         logger.error(error_message)
         sys.exit(error_message)
@@ -233,15 +278,34 @@ def flatten_post_data(post_group):
     parent_id = int(post_metadata_list[0])
     post_type = post_metadata_list[1]
     post_score = int(post_metadata_list[2])
-    post_tags = post_metadata_list[3]
+    # post_tags = post_metadata_list[3]
 
     return post_id, {
         'parent_id': parent_id,
         'post_type': post_type,
         'score': post_score,
-        'tags': post_tags,
+        # 'tags': post_tags,
         'code_blocks': post_code_blocks_list
     }
+
+
+def filter_empty_post_metadata(post_pair):
+    """
+    Upon merging, the data from post_history that is not related to Java gets populated with an empty post_metadata list
+    so we remove them
+    """
+    post_id, post_data = post_pair
+    return len(post_data['post_metadata']) != 0
+
+
+def remove_empty_posts(post_pair):
+    """
+    Although it looks a bit reduntant, this step is necessary, because the merger from PostHistory data generates
+    empty entries here again
+    """
+    post_id, post_data = post_pair
+    # non_empty_code_block_post = {k: v for k, v in post_data.items() if k == 'code_blocks' and len(v) != 0}
+    return len(post_data['code_blocks']) != 0
 
 
 def filter_score_grouped_pair(post_pair):
@@ -269,7 +333,8 @@ def extract_post_history_attributes(dict_elem):
     return {
         'PostId': int(dict_elem['PostId']),
         'CreationDate': dict_elem['CreationDate'],
-        'Text': text
+        'Text': text,
+        'PostHistoryTypeId': int(dict_elem['PostHistoryTypeId'])
     }
 
 
@@ -352,6 +417,11 @@ def flatten_question(post_pair):
     }
 
 
+def remove_tags(post_pair):
+    post_id, post_dict = post_pair
+    post_dict.pop('tags')
+    return post_id, post_dict
+
 def get_post_id(dict_elem):
     """
     Returns the key property of the attribute dict i.e. the post id
@@ -372,6 +442,15 @@ def get_most_recent_version(post_edits_pair):
     post_edits = list(post_edits)
     post_edits.sort(key=lambda dict_elem: dict_elem['CreationDate'], reverse=True)
     return post_id, post_edits[0]
+
+
+def remove_creation_date(post_edit_pair):
+    """
+    Once columns a not longer necessary, stash them
+    """
+    post_id, post_edit = post_edit_pair
+    post_edit.pop('CreationDate')
+    return post_id, post_edit
 
 
 def extract_code_blocks(post_edit_pair):
