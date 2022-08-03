@@ -68,12 +68,11 @@ def run_pipeline(config):
                                 | "Filter post edits" >> beam.Filter(filter_post_edits)
                                 | "Remove PostHistoryTypeId column" >> beam.Map(remove_post_history_id)
                                 | "Extract code blocks" >> beam.Map(extract_code_blocks)
+                                | "Remove empty code blocks" >> beam.Filter(filter_nonempty_blocks)
                                 | "Group post history by post id" >> beam.GroupBy(get_post_id)
                                 | "Get most recent version for each post id" >> beam.Map(get_most_recent_version)
                                 | "Remove CreationDate column" >> beam.Map(remove_creation_date)
-                                | "Remove empty code blocks" >> beam.Filter(filter_nonempty_blocks)
                                 | "Strip code blocks" >> beam.Filter(strip_code_blocks)
-
                                 )
 
             output_path_without_ext, _ = os.path.splitext(output_path)
@@ -85,7 +84,6 @@ def run_pipeline(config):
              | "Filter empty post metadata" >> beam.Filter(filter_empty_post_metadata)
              | "Remove empty entries" >> beam.Filter(remove_empty_posts)
              | "Flatten grouped post data" >> beam.Map(flatten_post_data)
-
              | "Write code blocks to JSONL file" >> WriteToJson(output_path_without_ext))
 
     logger.info(f"Pipeline finished.")
@@ -165,14 +163,14 @@ def filter_java_tags(post_pair):
     return '<java>' in post_pair[1][0]["Tags"]
 
 
-def filter_nonempty_blocks(post_pair):
+def filter_nonempty_blocks(post_dict):
     """
     Filters out code_blocks that have no snippets
-    :param post_pair: pair with post_id, dict with post metadata and code blocks
+    :param post_dict: post dictionary
     :return: boolean indicating whether post has snippets
     """
-    _, post_data = post_pair
-    return len(post_data['code_blocks']) != 0
+
+    return len(post_dict['code_blocks']) != 0
 
 
 def strip_code_blocks(post_pair):
@@ -278,7 +276,6 @@ def flatten_post_data(post_group):
         sys.exit(error_message)
 
     post_metadata_list = list(itertools.chain(*post_dict['post_metadata']))
-    post_code_blocks_list = list(itertools.chain(*post_dict['post_code_blocks']))
 
 
     if len(post_metadata_list) != 3:
@@ -296,7 +293,7 @@ def flatten_post_data(post_group):
         'post_type': post_type,
         'score': post_score,
         # 'tags': post_tags,
-        'code_blocks': code_blocks
+        'code_blocks': [block.strip() for block in code_blocks]
     }
 
 
