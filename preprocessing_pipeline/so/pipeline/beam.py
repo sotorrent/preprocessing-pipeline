@@ -90,29 +90,6 @@ def run_pipeline(config):
 
     logger.info(f"Pipeline finished.")
 
-def print_before_bailing(input_data):
-    print(f'after filtering metadata {input_data}')
-    return input_data
-
-
-def print_before_most_recent(input_data):
-    print(f'before sorting by recent {input_data}')
-    return input_data
-
-
-def print_before_extracting_blocks(input_data):
-    print(f'before extracting blocks {input_data}')
-    return input_data
-
-
-def print_after_extracting_blocks(input_data):
-    print(f'after extracting blocks {input_data}')
-    return input_data
-
-
-def print_input(input_data):
-    return input_data
-
 
 def filter_rows(input_str):
     """
