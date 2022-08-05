@@ -1,0 +1,15 @@
+{
+  "setup_file": "./setup.py",
+  "save_main_session": true,
+  "datasets": [
+    "stackoverflow.com"
+  ],
+  "pipeline": {
+    "input_dir": "./datasets/",
+    "output_dir": "./output/",
+    "pipeline_options": {
+      "runner": "DirectRunner",
+      "job_name": "preprocessing-pipeline"
+    }
+  }
+}
